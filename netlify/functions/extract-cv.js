@@ -107,28 +107,31 @@ exports.handler = async (event) => {
 
     const geminiMime = mimeType === 'application/pdf' ? 'application/pdf' : mimeType;
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: geminiMime, data: base64 } },
-              { text: PROMPT }
-            ]
-          }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 2048,
-            responseMimeType: 'application/json'
-          }
-        })
-      }
-    );
+    async function callGemini(prompt, model) {
+      return fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: geminiMime, data: base64 } },
+                { text: prompt }
+              ]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 4096,
+              responseMimeType: 'application/json'
+            }
+          })
+        }
+      );
+    }
 
-    const data = await response.json();
+    let response = await callGemini(PROMPT, 'gemini-2.5-flash');
+    let data = await response.json();
 
     if (!response.ok) {
       const errMsg = data.error?.message || JSON.stringify(data);
@@ -139,18 +142,33 @@ exports.handler = async (event) => {
       };
     }
 
-    const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
+    let rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '')
       .replace(/```json|```/g, '')
       .trim();
 
-    const parsed = safeJSONParse(rawText);
+    let parsed = safeJSONParse(rawText);
+
+    // Retry with simpler prompt if first attempt failed
+    if (!parsed.ok) {
+      const SIMPLE_PROMPT = 'Extrais les informations du CV en JSON valide. Format strict : {"civilite":"M./Mme","nom":"NOM","prenom":"Prenom","telephone":"","email":"","specialite":"","sousSpecialite":"","experience":0,"diplome":"","dateNaissance":"","rpps":"","disponibilite":"","linkedin":"","contratSouhaite":[],"mobilite":[],"salaireMin":0,"salaireMax":0,"tempsTravail":"Temps plein","notes":""}. Réponds UNIQUEMENT en JSON.';
+      response = await callGemini(SIMPLE_PROMPT, 'gemini-2.5-flash');
+      data = await response.json();
+      if (response.ok) {
+        rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '')
+          .replace(/```json|```/g, '')
+          .trim();
+        parsed = safeJSONParse(rawText);
+      }
+    }
+
     if (!parsed.ok) {
       return {
         statusCode: 502,
         headers,
         body: JSON.stringify({
-          error: `Impossible de parser la réponse : ${parsed.error}`,
-          raw: parsed.raw
+          error: `Impossible de parser la réponse Gemini : ${parsed.error}`,
+          raw: parsed.raw,
+          hint: 'Le CV est peut-être scanné en image basse qualité ou dans un format non lisible. Saisissez les infos manuellement.'
         })
       };
     }
